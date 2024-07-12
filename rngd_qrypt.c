@@ -48,7 +48,7 @@
 #include "fips.h"
 #include "rngd_entsource.h"
 
-#define QRYPT_URL "https://api-eus.qrypt.com/api/v1/quantum-entropy?size=1"
+#define QRYPT_URL "https://api-eus.qrypt.com/api/v1/entropy"
 #define ENT_BUF 1024
 #define REFILL_THRESH 128
 static uint8_t entropy_buffer[ENT_BUF];
@@ -75,7 +75,7 @@ struct body_buffer {
 };
 
 static const char base64[] =
-  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  "ABCDEFGHIJKLMNOPQRSTUV	WXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 static size_t decodeQuantum(unsigned char *dest, const char *src)
 {
@@ -189,57 +189,56 @@ uint8_t *base64_decode(const char *     data,
 
 static void extract_and_refill_entropy(struct body_buffer *buf)
 {
-	json_t *json;
-	json_t *array;
-	json_t *bdata;
-	uint8_t *decode_data = NULL;
-	size_t decode_len = 0;
-	json_error_t err;
+    json_t *json;
+    json_t *array;
+    json_t *bdata;
+    uint8_t *decode_data = NULL;
+    size_t decode_len = 0;
+    json_error_t err;
 
-	json = json_loads(buf->response, buf->size, &err);
+    json = json_loads(buf->response, buf->size, &err);
+    if (!json) {
+        message_entsrc(my_ent_src, LOG_DAEMON|LOG_INFO, "Failed to parse JSON response: %s\n", err.text);
+        fatal_error = true;
+        goto out;
+    }
 
-	if (!json) {
-		message_entsrc(my_ent_src, LOG_DAEMON|LOG_INFO, "failed to parse returned json\n");
-		fatal_error = true;
-		goto out;
-	}
+    array = json_object_get(json, "entropy");
+    if (!array || !json_is_array(array)) {
+        message_entsrc(my_ent_src, LOG_DAEMON|LOG_INFO, "Failed to find or invalid entropy array in JSON response\n");
+        fatal_error = true;
+        goto out;
+    }
 
-	array = json_object_get(json, "random");
-	if (!array) {
-		message_entsrc(my_ent_src, LOG_DAEMON|LOG_INFO, "failed to find random array\n");
-		fatal_error = true;
-		goto out;
-	}
+    bdata = json_array_get(array, 0);
+    if (!bdata || !json_is_string(bdata)) {
+        message_entsrc(my_ent_src, LOG_DAEMON|LOG_INFO, "Failed to find or invalid data in entropy array\n");
+        fatal_error = true;
+        goto out;
+    }
 
-	bdata = json_array_get(array, 0);
-	if (!bdata) {
-		message_entsrc(my_ent_src, LOG_DAEMON|LOG_INFO, "failed to find random array index\n");
-		fatal_error = true;
-		goto out;
-	}
+    decode_data = base64_decode(json_string_value(bdata), strlen(json_string_value(bdata)), &decode_len);  
+    if (!decode_data) {
+        message_entsrc(my_ent_src, LOG_DAEMON|LOG_INFO, "Failed to decode entropy data\n");
+        fatal_error = true;
+        goto out;
+    }
 
-	decode_data = base64_decode(json_string_value(bdata), strlen(json_string_value(bdata)), &decode_len);	
-	if (!decode_data) {
-		message_entsrc(my_ent_src, LOG_DAEMON|LOG_INFO, "failed to decode random data\n");
-		fatal_error = true;
-		goto out;
-	}
-	pthread_mutex_lock(&ent_lock);
-	decode_len = MIN(decode_len, ENT_BUF);
-	memcpy(entropy_buffer, decode_data, decode_len);
-	ent_idx = 0;
-	avail_ent = decode_len;
-	pthread_mutex_unlock(&ent_lock);
+    pthread_mutex_lock(&ent_lock);
+    decode_len = MIN(decode_len, ENT_BUF);
+    memcpy(entropy_buffer, decode_data, decode_len);
+    ent_idx = 0;
+    avail_ent = decode_len;
+    pthread_mutex_unlock(&ent_lock);
 
-	/* We should have valid data now, so reset the backoff counter */
-	backoff_iteration = 0;
+    // Reset the backoff counter upon successful data retrieval
+    backoff_iteration = 0;
 
 out:
-	if (decode_data)
-		free(decode_data);
-	if (json)
-		json_decref(json);
-	return;
+    if (decode_data)
+        free(decode_data);
+    if (json)
+        json_decref(json);
 }
 
 static size_t write_callback(char *data, size_t size, size_t nmemb, void *userdata)
@@ -296,6 +295,7 @@ static void *refill_task(void *data __attribute__((unused)))
 	long response_code;
 	struct body_buffer response_data;
 	bool recoverable_error = false;
+	const char *post_data_fmt = "{\"block_size\":1024,\"block_count\":1}";
 
 	pthread_mutex_lock(&ent_lock);
 	refilling = true;
@@ -344,6 +344,19 @@ static void *refill_task(void *data __attribute__((unused)))
 			"curl_easy_setopt(HTTPHEADER) failed: %s\n", curl_easy_strerror(res));
 		goto out;
 	}
+	res = curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    if (res != CURLE_OK) {
+        message_entsrc(my_ent_src, LOG_DAEMON|LOG_INFO,
+                       "curl_easy_setopt(POST) failed: %s\n", curl_easy_strerror(res));
+        goto out;
+    }
+	res = curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data_fmt);
+    if (res != CURLE_OK) {
+        message_entsrc(my_ent_src, LOG_DAEMON|LOG_INFO,
+                       "curl_easy_setopt(jsonpayload/POSTFIELDS) failed: %s\n", curl_easy_strerror(res));
+        goto out;
+    }
+
 
 	res = curl_easy_perform(curl);
 	if (res != CURLE_OK) {
