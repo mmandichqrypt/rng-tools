@@ -48,7 +48,7 @@
 #include "fips.h"
 #include "rngd_entsource.h"
 
-#define QRYPT_URL "https://api-eus.qrypt.com/api/v1/quantum-entropy?size=1"
+#define QRYPT_URL "http://192.168.36.147:3000/api/v1/get_entropy"
 #define ENT_BUF 1024
 #define REFILL_THRESH 128
 static uint8_t entropy_buffer[ENT_BUF];
